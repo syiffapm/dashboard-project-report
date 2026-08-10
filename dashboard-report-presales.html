@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Delivery Console — LinkIT360</title>
+  <link rel="stylesheet" href="assets/css/dashboard-report-presales.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="mark">LK</div>
+        <div class="name">Delivery Console</div>
+        <div class="desc">LinkIT360 &middot; PMO</div>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Overview</div>
+        <button class="nav-item" data-page="dashboard"><span class="ic">🏠</span>Dashboard</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Reports</div>
+        <button class="nav-item" data-page="daily"><span class="ic">📅</span>Daily Report</button>
+        <button class="nav-item" data-page="weekly"><span class="ic">📈</span>Weekly Report</button>
+        <button class="nav-item" data-page="projreport"><span class="ic">📝</span>Project Report</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Team</div>
+        <button class="nav-item" data-page="manpower"><span class="ic">👥</span>Man-Power</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Portfolio</div>
+        <button class="nav-item" data-page="projects"><span class="ic">🗂️</span>Projects</button>
+      </div>
+      <div class="sidebar-foot">Data is saved locally in this browser. Export a backup after each update so nothing is lost.</div>
+    </aside>
+
+    <div class="main">
+      <div class="topbar">
+        <div class="titles">
+          <div class="eyebrow" id="topEyebrow">Overview</div>
+          <h1 id="topTitle">Dashboard</h1>
+        </div>
+        <div class="actions" id="topActions"></div>
+      </div>
+      <div class="page" id="pageRoot">
+        <div id="printTitle"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="chart-tooltip" id="chartTooltip"></div>
+  <div class="toast" id="toast"></div>
+  <input type="file" accept="application/json" class="hidden-file" id="fileImport" />
+
+  <div class="modal-backdrop" id="jiraModalBackdrop">
+    <div class="modal">
+      <h3>Create Jira Ticket</h3>
+      <div class="modal-sub">Creates a real issue on linkit360.atlassian.net using your Atlassian connection.</div>
+      <div class="modal-status" id="jiraModalStatus"></div>
+      <div class="modal-grid">
+        <div class="mfield full"><label class="field-label">Space</label><select id="jiraProject"></select></div>
+        <div class="mfield"><label class="field-label">Issue type</label><select id="jiraType"><option value="Task">Task</option><option value="Bug">Bug</option><option value="Story">Story</option></select></div>
+        <div class="mfield"><label class="field-label">Assignee</label><select id="jiraAssignee"></select></div>
+        <div class="mfield full"><label class="field-label">Epic / parent key (optional)</label><input type="text" id="jiraParent" placeholder="e.g. BR-84"></div>
+        <div class="mfield full"><label class="field-label">Summary</label><input type="text" id="jiraSummary" placeholder="Short ticket title"></div>
+        <div class="mfield full"><label class="field-label">Description</label><textarea id="jiraDesc" rows="3" placeholder="Details (optional)"></textarea></div>
+        <div class="mfield"><label class="field-label">Start date</label><input type="date" id="jiraStart"></div>
+        <div class="mfield"><label class="field-label">Due date</label><input type="date" id="jiraDue"></div>
+      </div>
+      <div class="mactions">
+        <button class="btn ghost" id="jiraCancel">Cancel</button>
+        <button class="btn primary" id="jiraSubmit">Create Ticket</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/js/dashboard-report-presales.js"></script>
+</body>
+</html>
