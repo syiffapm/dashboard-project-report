@@ -209,6 +209,11 @@ table.dtable tr:last-child td { border-bottom: none; }
 .entry-mid .module a.jira-link { color: var(--ink); text-decoration: none; border-bottom: 1px dashed var(--border-strong); }
 .entry-mid .module a.jira-link:hover { color: var(--accent); border-color: var(--accent); }
 .entry-mid .note { font-size: 11.5px; color: var(--ink-muted); margin-top: 2px; }
+.note-highlight { font-size: 11.5px; margin-top: 6px; padding: 7px 10px; border-radius: 7px; line-height: 1.5; }
+.note-highlight.hold { background: var(--critical-soft); color: var(--critical); border-left: 3px solid var(--critical); }
+.note-highlight b { font-weight: 750; }
+.note-highlight i { opacity: .8; }
+.blocked-by-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--warning); background: var(--warning-soft); border-radius: 99px; padding: 1px 7px; margin-left: 6px; }
 .no-entries { color: var(--ink-muted); font-size: 12.5px; padding: 20px 4px; text-align: center; }
 
 .deliverables { margin-top: 8px; margin-left: 136px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

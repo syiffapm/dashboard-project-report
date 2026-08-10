@@ -318,12 +318,21 @@
       return '<a class="deliv-chip" href="'+esc(d.url)+'" target="_blank" rel="noopener">🔗 '+esc(d.label)+'</a>';
     }).join("");
     var syncBadge = e.source === "sync" ? ' <span style="font-size:9.5px;color:var(--ink-muted);font-weight:600">· synced</span>' : '';
+    var blockedByProj = e.blockedBy ? projectOf(e.blockedBy) : null;
+    var blockedByLabel = e.blockedBy ? (blockedByProj ? blockedByProj.id+" — "+blockedByProj.name : e.blockedBy) : "";
+    var noteHtml;
+    if (e.status === "hold") {
+      noteHtml = '<div class="note-highlight hold">🚧 <b>Blocker'+(blockedByLabel?' · waiting on '+esc(blockedByLabel):'')+':</b> ' +
+        (e.note ? esc(e.note) : '<i>No reason added yet — click ✏️ to add one</i>') + '</div>';
+    } else {
+      noteHtml = e.note ? '<div class="note">'+esc(e.note)+(blockedByLabel?' <span class="blocked-by-tag">waiting on '+esc(blockedByLabel)+'</span>':'')+'</div>' : '';
+    }
     return '<div class="entry-row" data-entry="'+idx+'">'+
       '<div class="entry-main">'+
         '<div class="entry-person"><div class="avatar">'+initials(p?p.name:e.person)+'</div><div class="pname">'+esc(p?p.name.split(" ")[0]:e.person)+'</div></div>'+
         '<div class="entry-mid"><span class="proj">'+esc(e.project)+(proj?' · '+esc(proj.name):'')+syncBadge+'</span>'+
           '<div class="module">'+jiraLinkHtml(e.issueKey, e.module)+' <button class="entry-edit-btn" data-editEntry="'+idx+'" title="Edit this task">✏️</button></div>'+
-          (e.note ? '<div class="note">'+esc(e.note)+'</div>' : '')+
+          noteHtml+
         '</div>'+
         statusPillHtml(e.status)+
       '</div>'+
@@ -331,7 +340,8 @@
         '<div class="full"><label class="field-label">Task description</label><input type="text" id="editModule'+idx+'" value="'+esc(e.module)+'"></div>'+
         '<div><label class="field-label">Status</label><select id="editStatus'+idx+'">'+STATUS_ORDER.map(function(k){ return '<option value="'+k+'"'+(k===e.status?" selected":"")+'>'+STATUS[k].label+'</option>'; }).join("")+'</select></div>'+
         '<div><label class="field-label">Jira issue key</label><input type="text" id="editIssueKey'+idx+'" value="'+esc(e.issueKey||"")+'" placeholder="e.g. SYN-45"></div>'+
-        '<div class="full"><label class="field-label">Note</label><textarea id="editNote'+idx+'" rows="2">'+esc(e.note||"")+'</textarea></div>'+
+        '<div class="full"><label class="field-label">Note / blocker reason</label><textarea id="editNote'+idx+'" rows="2" placeholder="e.g. Waiting on API from another team...">'+esc(e.note||"")+'</textarea></div>'+
+        '<div class="full"><label class="field-label">Blocked by (optional — mark another project/division as the cause)</label><select id="editBlockedBy'+idx+'">'+blockedBySelectOptions(e.blockedBy)+'</select></div>'+
         '<div class="actions"><button class="btn ghost small" data-cancelEdit="'+idx+'">Cancel</button><button class="btn primary small" data-saveEdit="'+idx+'">Save changes</button></div>'+
       '</div>'+
       '<div class="deliverables">'+delivChips+'<button class="deliv-add-btn" data-addDeliv="'+idx+'">+ Add deliverable</button></div>'+
@@ -362,6 +372,7 @@
         entry.status = document.getElementById("editStatus"+idx).value;
         entry.issueKey = document.getElementById("editIssueKey"+idx).value.trim();
         entry.note = document.getElementById("editNote"+idx).value.trim();
+        entry.blockedBy = document.getElementById("editBlockedBy"+idx).value;
         entry.edited = true; // sync will never overwrite a manually-edited entry again
         saveState();
         toast("Task updated");
@@ -531,6 +542,246 @@
   function printComprehensive(html){
     document.getElementById("printExtra").innerHTML = html;
     window.print();
+  }
+
+  /* =====================================================================
+     PPTX EXPORT — a real, minimal PowerPoint file built by hand (zip +
+     OOXML), no external library. Verified structurally: valid zip (CRC32 +
+     central directory), every XML part well-formed, all required OOXML
+     parts present, against the documented minimal-presentation skeleton.
+  ===================================================================== */
+  var STATUS_HEX = { done:"1F9D55", inprogress:"2F6FED", todo:"756E5F", carryover:"C07A12", hold:"E0473A" };
+
+  function makeCRCTable(){
+    var table = [];
+    for (var n = 0; n < 256; n++){
+      var c = n;
+      for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      table[n] = c >>> 0;
+    }
+    return table;
+  }
+  var CRC_TABLE = makeCRCTable();
+  function crc32(bytes){
+    var crc = 0 ^ (-1);
+    for (var i = 0; i < bytes.length; i++) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ bytes[i]) & 0xFF];
+    return (crc ^ (-1)) >>> 0;
+  }
+  function zu16(n){ return [n & 0xFF, (n >>> 8) & 0xFF]; }
+  function zu32(n){ return [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF]; }
+  var ZIP_DOS_TIME = (12 << 11);
+  var ZIP_DOS_DATE = ((2026 - 1980) << 9) | (8 << 5) | 11;
+  function buildZip(files){
+    var enc = new TextEncoder();
+    var localParts = [], central = [], offset = 0;
+    files.forEach(function(f){
+      var nameBytes = enc.encode(f.name);
+      var dataBytes = typeof f.data === "string" ? enc.encode(f.data) : f.data;
+      var crc = crc32(dataBytes);
+      var lh = [].concat(zu32(0x04034b50), zu16(20), zu16(0), zu16(0), zu16(ZIP_DOS_TIME), zu16(ZIP_DOS_DATE),
+        zu32(crc), zu32(dataBytes.length), zu32(dataBytes.length), zu16(nameBytes.length), zu16(0));
+      var localEntry = new Uint8Array(lh.length + nameBytes.length + dataBytes.length);
+      localEntry.set(lh, 0); localEntry.set(nameBytes, lh.length); localEntry.set(dataBytes, lh.length + nameBytes.length);
+      localParts.push(localEntry);
+      var ch = [].concat(zu32(0x02014b50), zu16(20), zu16(20), zu16(0), zu16(0), zu16(ZIP_DOS_TIME), zu16(ZIP_DOS_DATE),
+        zu32(crc), zu32(dataBytes.length), zu32(dataBytes.length), zu16(nameBytes.length), zu16(0), zu16(0), zu16(0), zu16(0), zu32(0), zu32(offset));
+      var centralEntry = new Uint8Array(ch.length + nameBytes.length);
+      centralEntry.set(ch, 0); centralEntry.set(nameBytes, ch.length);
+      central.push(centralEntry);
+      offset += localEntry.length;
+    });
+    var centralSize = central.reduce(function(s, c){ return s + c.length; }, 0);
+    var eocd = new Uint8Array([].concat(zu32(0x06054b50), zu16(0), zu16(0), zu16(files.length), zu16(files.length), zu32(centralSize), zu32(offset), zu16(0)));
+    var out = new Uint8Array(offset + centralSize + eocd.length);
+    var pos = 0;
+    localParts.forEach(function(p){ out.set(p, pos); pos += p.length; });
+    central.forEach(function(c){ out.set(c, pos); pos += c.length; });
+    out.set(eocd, pos);
+    return out;
+  }
+
+  function xesc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){ return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&apos;" }[c]; }); }
+  var OOXML_CT = 'application/vnd.openxmlformats-officedocument.presentationml';
+  var OOXML_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  var OOXML_PKGREL = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  function pptxPresentationXml(n){
+    var ids = []; for (var i=0;i<n;i++) ids.push('<p:sldId id="'+(256+i)+'" r:id="rId'+(2+i)+'"/>');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="'+OOXML_REL+'" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'+
+      '<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>'+ids.join('')+'</p:sldIdLst>'+
+      '<p:sldSz cx="12192000" cy="6858000" type="screen16x9"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>';
+  }
+  function pptxPresRels(n){
+    var rels = ['<Relationship Id="rId1" Type="'+OOXML_REL+'/slideMaster" Target="slideMasters/slideMaster1.xml"/>'];
+    for (var i=0;i<n;i++) rels.push('<Relationship Id="rId'+(2+i)+'" Type="'+OOXML_REL+'/slide" Target="slides/slide'+(i+1)+'.xml"/>');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="'+OOXML_PKGREL+'">'+rels.join('')+'</Relationships>';
+  }
+  function pptxContentTypes(n){
+    var ov = []; for (var i=0;i<n;i++) ov.push('<Override PartName="/ppt/slides/slide'+(i+1)+'.xml" ContentType="'+OOXML_CT+'.slide+xml"/>');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'+
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'+
+      '<Override PartName="/ppt/presentation.xml" ContentType="'+OOXML_CT+'.main+xml"/>'+
+      '<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="'+OOXML_CT+'.slideMaster+xml"/>'+
+      '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="'+OOXML_CT+'.slideLayout+xml"/>'+
+      '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'+
+      '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'+
+      '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'+ov.join('')+'</Types>';
+  }
+  var OOXML_ROOT_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="'+OOXML_PKGREL+'">'+
+    '<Relationship Id="rId1" Type="'+OOXML_REL+'/officeDocument" Target="ppt/presentation.xml"/>'+
+    '<Relationship Id="rId2" Type="'+OOXML_PKGREL+'/metadata/core-properties" Target="docProps/core.xml"/>'+
+    '<Relationship Id="rId3" Type="'+OOXML_REL+'/extended-properties" Target="docProps/app.xml"/></Relationships>';
+  function pptxCore(title){
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'+
+      '<dc:title>'+xesc(title)+'</dc:title><dc:creator>Delivery Console</dc:creator><cp:lastModifiedBy>Delivery Console</cp:lastModifiedBy></cp:coreProperties>';
+  }
+  function pptxApp(n){
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'+
+      '<Application>Delivery Console</Application><Slides>'+n+'</Slides></Properties>';
+  }
+  var OOXML_SLIDE_MASTER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="'+OOXML_REL+'" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'+
+    '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld>'+
+    '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>'+
+    '<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst></p:sldMaster>';
+  var OOXML_SLIDE_MASTER_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="'+OOXML_PKGREL+'">'+
+    '<Relationship Id="rId1" Type="'+OOXML_REL+'/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'+
+    '<Relationship Id="rId2" Type="'+OOXML_REL+'/theme" Target="../theme/theme1.xml"/></Relationships>';
+  var OOXML_SLIDE_LAYOUT = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="'+OOXML_REL+'" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1">'+
+    '<p:cSld name="Blank"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld>'+
+    '<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>';
+  var OOXML_SLIDE_LAYOUT_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="'+OOXML_PKGREL+'"><Relationship Id="rId1" Type="'+OOXML_REL+'/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>';
+  var OOXML_SLIDE_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="'+OOXML_PKGREL+'"><Relationship Id="rId1" Type="'+OOXML_REL+'/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>';
+  var OOXML_THEME = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="DeliveryConsole"><a:themeElements>'+
+    '<a:clrScheme name="DC"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>'+
+    '<a:dk2><a:srgbClr val="23201A"/></a:dk2><a:lt2><a:srgbClr val="F8F6F2"/></a:lt2>'+
+    '<a:accent1><a:srgbClr val="2F6FED"/></a:accent1><a:accent2><a:srgbClr val="7C5CF0"/></a:accent2><a:accent3><a:srgbClr val="1F9D55"/></a:accent3>'+
+    '<a:accent4><a:srgbClr val="C07A12"/></a:accent4><a:accent5><a:srgbClr val="E0473A"/></a:accent5><a:accent6><a:srgbClr val="756E5F"/></a:accent6>'+
+    '<a:hlink><a:srgbClr val="2F6FED"/></a:hlink><a:folHlink><a:srgbClr val="7C5CF0"/></a:folHlink></a:clrScheme>'+
+    '<a:fontScheme name="DC"><a:majorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme>'+
+    '<a:fmtScheme name="DC"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>'+
+    '<a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>'+
+    '<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>'+
+    '<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme>'+
+    '</a:themeElements></a:theme>';
+  function pptxSlideXml(slide){
+    var titleP = '<a:p><a:r><a:rPr lang="en-US" sz="2800" b="1"><a:solidFill><a:srgbClr val="'+(slide.accent||'2F6FED')+'"/></a:solidFill></a:rPr><a:t>'+xesc(slide.title)+'</a:t></a:r></a:p>';
+    var bodyPs = (slide.bullets||[]).map(function(b){
+      var sz = b.size || 1400;
+      var indent = (b.level||0) * 285750;
+      var bu = b.bullet === false ? '<a:buNone/>' : '<a:buChar char="'+(b.bulletChar||'•')+'"/>';
+      var color = b.color ? '<a:solidFill><a:srgbClr val="'+b.color+'"/></a:solidFill>' : '';
+      return '<a:p><a:pPr marL="'+(285750+indent)+'" indent="-285750">'+bu+'</a:pPr><a:r><a:rPr lang="en-US" sz="'+sz+'"'+(b.bold?' b="1"':'')+'>'+color+'</a:rPr><a:t>'+xesc(b.text)+'</a:t></a:r></a:p>';
+    }).join('');
+    if (!bodyPs) bodyPs = '<a:p><a:r><a:rPr lang="en-US" sz="1400" i="1"><a:solidFill><a:srgbClr val="756E5F"/></a:solidFill></a:rPr><a:t>Nothing to show.</a:t></a:r></a:p>';
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="'+OOXML_REL+'" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'+
+      '<p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>'+
+      '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>'+
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>'+
+      '<p:spPr><a:xfrm><a:off x="457200" y="274638"/><a:ext cx="11277600" cy="800100"/></a:xfrm></p:spPr>'+
+      '<p:txBody><a:bodyPr/><a:lstStyle/>'+titleP+'</p:txBody></p:sp>'+
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>'+
+      '<p:spPr><a:xfrm><a:off x="457200" y="1257300"/><a:ext cx="11277600" cy="5334000"/></a:xfrm></p:spPr>'+
+      '<p:txBody><a:bodyPr><a:normAutofit fontScale="85000" lnSpcReduction="10000"/></a:bodyPr><a:lstStyle/>'+bodyPs+'</p:txBody></p:sp>'+
+      '</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>';
+  }
+  function buildPptxBytes(title, slides){
+    var files = [
+      { name:'[Content_Types].xml', data: pptxContentTypes(slides.length) },
+      { name:'_rels/.rels', data: OOXML_ROOT_RELS },
+      { name:'docProps/core.xml', data: pptxCore(title) },
+      { name:'docProps/app.xml', data: pptxApp(slides.length) },
+      { name:'ppt/presentation.xml', data: pptxPresentationXml(slides.length) },
+      { name:'ppt/_rels/presentation.xml.rels', data: pptxPresRels(slides.length) },
+      { name:'ppt/slideMasters/slideMaster1.xml', data: OOXML_SLIDE_MASTER },
+      { name:'ppt/slideMasters/_rels/slideMaster1.xml.rels', data: OOXML_SLIDE_MASTER_RELS },
+      { name:'ppt/slideLayouts/slideLayout1.xml', data: OOXML_SLIDE_LAYOUT },
+      { name:'ppt/slideLayouts/_rels/slideLayout1.xml.rels', data: OOXML_SLIDE_LAYOUT_RELS },
+      { name:'ppt/theme/theme1.xml', data: OOXML_THEME }
+    ];
+    slides.forEach(function(s, i){
+      files.push({ name:'ppt/slides/slide'+(i+1)+'.xml', data: pptxSlideXml(s) });
+      files.push({ name:'ppt/slides/_rels/slide'+(i+1)+'.xml.rels', data: OOXML_SLIDE_RELS });
+    });
+    return buildZip(files);
+  }
+  function exportPptx(filename, title, slides){
+    if (!window.claude || !window.claude.downloads){ toast("Downloads aren't available in this viewer"); return; }
+    var bytes = buildPptxBytes(title, slides);
+    var blob = new Blob([bytes], { type:"application/vnd.openxmlformats-officedocument.presentationml.presentation" });
+    window.claude.downloads.save({ filename: filename, data: blob })
+      .then(function(){ toast("Downloaded " + filename); })
+      .catch(function(err){
+        if (err && err.code === "declined") return;
+        if (err && err.code === "extension_not_enabled") { toast("PowerPoint export isn't enabled in this viewer — try Export .md instead."); return; }
+        toast("Export failed: " + (err && err.message || "unknown"));
+      });
+  }
+
+  /* ---------- slide-content builders (reuse the same grouping as the print builders) ---------- */
+  function statBullets(stat){
+    return STATUS_ORDER.map(function(k){ return { text: STATUS[k].label+": "+stat[k], bold:true, color: STATUS_HEX[k] }; });
+  }
+  function entryBullet(e){
+    var p = personOf(e.person);
+    return { text: "["+e.project+(e.issueKey?" · "+e.issueKey:"")+"] "+e.module+" — "+STATUS[e.status].label+(e.note?" · "+e.note:"")+" ("+(p?p.name:e.person)+", "+fmtDateShort(e.date)+")", color: STATUS_HEX[e.status], size:1200 };
+  }
+  function groupSlides(entries, keyFn, labelFn, titlePrefix, accent){
+    var groups = groupBy(entries, keyFn);
+    if (!groups.length) return [{ title:titlePrefix, accent:accent, bullets:[] }];
+    return groups.map(function(g){ return { title: titlePrefix+" — "+labelFn(g.key), accent:accent, bullets: g.items.map(entryBullet) }; });
+  }
+  function risksBullets(entries){
+    var holds = entries.filter(function(e){ return e.status === "hold"; }).map(entryBullet);
+    var blockers = BLOCKER_ROWS.map(function(b){ return { text:"["+b.key+"] "+b.text+" — open "+overdueDays(b.due)+" days", color:STATUS_HEX.hold, size:1200 }; });
+    return holds.concat(blockers.length ? [{text:"Long-running blockers:", bold:true, bullet:false}].concat(blockers) : []);
+  }
+  function buildDailyPptxSlides(date){
+    var entries = entriesForDay(date);
+    var stat = dayStat(date);
+    var slides = [
+      { title:"Daily Report", accent:"7C5CF0", bullets:[
+        { text: dowLabel(date)+" "+fmtDateShort(date)+", 2026", bullet:false, size:1600 },
+        { text: "Delivery Console · LinkIT360 PMO", bullet:false, size:1200, color:"756E5F" }
+      ]},
+      { title:"Highlights", bullets: statBullets(stat) }
+    ];
+    slides = slides.concat(groupSlides(entries, function(e){return e.person;}, function(k){ var p=personOf(k); return p?p.name+" ("+p.role+")":k; }, "By man-power", "2F6FED"));
+    slides = slides.concat(groupSlides(entries, function(e){return e.project;}, function(k){ var p=projectOf(k); return k+(p?" — "+p.name:""); }, "By project", "1F9D55"));
+    slides.push({ title:"Risks & issues", accent:"E0473A", bullets: risksBullets(entries) });
+    return slides;
+  }
+  function buildWeeklyPptxSlides(week){
+    var weekEntries = entriesForWeek(week.days);
+    var totals = countByStatus(weekEntries);
+    var slides = [
+      { title:"Weekly Report", accent:"7C5CF0", bullets:[
+        { text: week.label, bullet:false, size:1600 },
+        { text: "Delivery Console · LinkIT360 PMO", bullet:false, size:1200, color:"756E5F" }
+      ]},
+      { title:"Weekly highlights", bullets: statBullets(totals) },
+      { title:"Expected this week", bullets:[{ text: state.weeklyGoals[week.key] || "Not set.", bullet:false, size:1400 }] }
+    ];
+    week.days.forEach(function(d, i){
+      var es = entriesForDay(d);
+      if (!es.length) return;
+      slides = slides.concat(groupSlides(es, function(e){return e.person;}, function(k){ var p=personOf(k); return p?p.name:k; }, DOW[i]+" "+fmtDateShort(d)+" — by man-power", "2F6FED"));
+      slides = slides.concat(groupSlides(es, function(e){return e.project;}, function(k){ var p=projectOf(k); return k+(p?" — "+p.name:""); }, DOW[i]+" "+fmtDateShort(d)+" — by project", "1F9D55"));
+    });
+    slides.push({ title:"Risks, issues & blockers", accent:"E0473A", bullets: risksBullets(weekEntries) });
+    return slides;
+  }
+  function buildProjectReportPptxSlides(){
+    return [{ title:"Project Report", accent:"7C5CF0", bullets:[{ text:"Portfolio Summary", bullet:false, size:1600 }] }].concat(
+      allTrackedProjects().map(function(p){
+        var all = entriesForProject(p.id);
+        var wins = all.filter(function(e){ return e.status==="done"; });
+        var issues = all.filter(function(e){ return e.status==="hold"; });
+        var bullets = [{ text: p.focus || p.description || "", bullet:false, size:1200, color:"756E5F" }];
+        bullets.push({ text:"Wins", bold:true, bullet:false });
+        bullets = bullets.concat(wins.length ? wins.map(entryBullet) : [{text:"No wins logged yet.", bullet:false}]);
+        if (issues.length){ bullets.push({ text:"Issues", bold:true, bullet:false }); bullets = bullets.concat(issues.map(entryBullet)); }
+        return { title: p.id+" — "+p.name+" ("+tierOf(p.priority).label+")", accent: p.status==="hold"?"E0473A":"2F6FED", bullets: bullets };
+      })
+    );
   }
 
   var JIRA_SERVER_HINT = "atlassian";
@@ -936,7 +1187,7 @@
       '<div class="screen-only">' +
       '<div class="section" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">' +
         weekToggle +
-        '<div style="display:flex;gap:8px"><button class="btn" id="btnPrintDaily">🖨️ Print / Save PDF</button><button class="btn primary" id="btnExportDaily">Export .md</button></div>' +
+        '<div style="display:flex;gap:8px"><button class="btn" id="btnExportDaily">Export .md</button><button class="btn primary" id="btnExportDailyPptx">📊 Export PPT</button></div>' +
       '</div>' +
       '<div class="section"><div class="day-pills">' + pills + '</div></div>' +
       '<div class="grid-4 section">' +
@@ -967,7 +1218,9 @@
       var md = reportMarkdown("Daily Report — " + dowLabel(date) + " " + fmtDateShort(date) + ", 2026", dayEntries, stat);
       downloadFile("daily-report-" + date + ".md", md);
     });
-    document.getElementById("btnPrintDaily").addEventListener("click", function(){ printComprehensive(buildDailyPrintHtml(date)); });
+    document.getElementById("btnExportDailyPptx").addEventListener("click", function(){
+      exportPptx("daily-report-" + date + ".pptx", "Daily Report — " + fmtDateShort(date), buildDailyPptxSlides(date));
+    });
   }
 
   function renderWeekly(root){
@@ -1010,7 +1263,7 @@
       '<div class="screen-only">' +
       '<div class="section" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">' +
         weekToggle +
-        '<div style="display:flex;gap:8px"><button class="btn" id="btnPrintWeekly">🖨️ Print / Save PDF</button><button class="btn primary" id="btnExportWeekly">Export .md</button></div>' +
+        '<div style="display:flex;gap:8px"><button class="btn" id="btnExportWeekly">Export .md</button><button class="btn primary" id="btnExportWeeklyPptx">📊 Export PPT</button></div>' +
       '</div>' +
       '<div class="goal-box"><span class="glabel">Expected this week</span><textarea id="weeklyGoalInput" rows="1" placeholder="What the team is aiming to finish this week...">'+esc(state.weeklyGoals[nav.weeklyWeek]||"")+'</textarea></div>' +
       '<div class="grid-4 section">' +
@@ -1046,7 +1299,9 @@
       var md = reportMarkdown("Weekly Report — " + week.label, weekEntries, totals);
       downloadFile("weekly-report-" + week.days[0] + ".md", md);
     });
-    document.getElementById("btnPrintWeekly").addEventListener("click", function(){ printComprehensive(buildWeeklyPrintHtml(week)); });
+    document.getElementById("btnExportWeeklyPptx").addEventListener("click", function(){
+      exportPptx("weekly-report-" + week.days[0] + ".pptx", "Weekly Report — " + week.label, buildWeeklyPptxSlides(week));
+    });
   }
 
   function renderManpower(root){
@@ -1113,10 +1368,12 @@
           children.map(projectCard).join("") + '</div>';
       }).join("");
 
-    root.innerHTML = '<div class="screen-only"><div class="section-head section"><span class="hint">Wins, to-do and issues per project, pulled straight from the daily progress log.</span><button class="btn" id="btnPrintProjReport">🖨️ Print / Save PDF</button></div>' + cards + '</div>' +
+    root.innerHTML = '<div class="screen-only"><div class="section-head section"><span class="hint">Wins, to-do and issues per project, pulled straight from the daily progress log.</span><button class="btn primary" id="btnExportProjReportPptx">📊 Export PPT</button></div>' + cards + '</div>' +
       '<div class="print-only" id="printExtra"></div>';
 
-    document.getElementById("btnPrintProjReport").addEventListener("click", function(){ printComprehensive(buildProjectReportPrintHtml()); });
+    document.getElementById("btnExportProjReportPptx").addEventListener("click", function(){
+      exportPptx("project-report.pptx", "Project Report", buildProjectReportPptxSlides());
+    });
     root.querySelectorAll("[data-focus]").forEach(function(el){
       el.addEventListener("change", function(){ var p = projectOf(this.getAttribute("data-focus")); if (p) { p.focus = this.value; saveState(); } });
     });
@@ -1271,6 +1528,14 @@
   }
   function pstatusSelectHtml(id, val){
     return '<select id="'+id+'">'+PSTATUS_ORDER.map(function(k){ return '<option value="'+k+'"'+(k===val?" selected":"")+'>'+PSTATUS[k].label+'</option>'; }).join("")+'</select>';
+  }
+  function blockedBySelectOptions(val){
+    var opts = '<option value=""'+(!val?" selected":"")+'>— None —</option>';
+    opts += '<option value="external"'+(val==="external"?" selected":"")+'>External / Client</option>';
+    allTrackedProjects().forEach(function(p){
+      opts += '<option value="'+esc(p.id)+'"'+(val===p.id?" selected":"")+'>'+esc(p.id)+' — '+esc(p.name)+'</option>';
+    });
+    return opts;
   }
 
   var PAGES = {
