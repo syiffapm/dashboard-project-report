@@ -731,6 +731,104 @@
       });
   }
 
+  /* =====================================================================
+     XLSX EXPORT — a real, minimal Excel workbook, same hand-rolled zip
+     approach as the PPTX export above (no external library).
+  ===================================================================== */
+  function colLetter(n){
+    var s = "";
+    while (n > 0) { var rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); }
+    return s;
+  }
+  function xlsxCell(colIdx, rowIdx, value){
+    var ref = colLetter(colIdx) + rowIdx;
+    if (typeof value === "number" && isFinite(value)) return '<c r="' + ref + '"><v>' + value + '</v></c>';
+    return '<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' + xesc(value == null ? "" : String(value)) + '</t></is></c>';
+  }
+  function xlsxSheetXml(rows){
+    var body = rows.map(function(r, i){
+      return '<row r="' + (i + 1) + '">' + r.map(function(v, j){ return xlsxCell(j + 1, i + 1, v); }).join('') + '</row>';
+    }).join('');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' + body + '</sheetData></worksheet>';
+  }
+  var XLSX_STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>' +
+    '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+    '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
+  function xlsxContentTypes(sheets){
+    var ov = sheets.map(function(s, i){ return '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'; }).join('');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      ov +
+      '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+      '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+      '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
+  }
+  function xlsxWorkbookXml(sheets){
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="' + OOXML_REL + '"><sheets>' +
+      sheets.map(function(s, i){ return '<sheet name="' + xesc(s.name.slice(0, 31)) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>'; }).join('') +
+      '</sheets></workbook>';
+  }
+  function xlsxWorkbookRels(sheets){
+    var rels = sheets.map(function(s, i){ return '<Relationship Id="rId' + (i + 1) + '" Type="' + OOXML_REL + '/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>'; });
+    rels.push('<Relationship Id="rId' + (sheets.length + 1) + '" Type="' + OOXML_REL + '/styles" Target="styles.xml"/>');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="' + OOXML_PKGREL + '">' + rels.join('') + '</Relationships>';
+  }
+  var XLSX_ROOT_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="' + OOXML_PKGREL + '">' +
+    '<Relationship Id="rId1" Type="' + OOXML_REL + '/officeDocument" Target="xl/workbook.xml"/>' +
+    '<Relationship Id="rId2" Type="' + OOXML_PKGREL + '/metadata/core-properties" Target="docProps/core.xml"/>' +
+    '<Relationship Id="rId3" Type="' + OOXML_REL + '/extended-properties" Target="docProps/app.xml"/></Relationships>';
+  function buildXlsxBytes(title, sheets){
+    var files = [
+      { name:'[Content_Types].xml', data: xlsxContentTypes(sheets) },
+      { name:'_rels/.rels', data: XLSX_ROOT_RELS },
+      { name:'docProps/core.xml', data: pptxCore(title) },
+      { name:'docProps/app.xml', data: pptxApp(sheets.length) },
+      { name:'xl/workbook.xml', data: xlsxWorkbookXml(sheets) },
+      { name:'xl/_rels/workbook.xml.rels', data: xlsxWorkbookRels(sheets) },
+      { name:'xl/styles.xml', data: XLSX_STYLES }
+    ];
+    sheets.forEach(function(s, i){ files.push({ name:'xl/worksheets/sheet' + (i + 1) + '.xml', data: xlsxSheetXml(s.rows) }); });
+    return buildZip(files);
+  }
+  function exportXlsx(filename, title, sheets){
+    var bytes = buildXlsxBytes(title, sheets);
+    var blob = new Blob([bytes], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    if (!window.claude || !window.claude.downloads){ browserDownload(filename, blob); return; }
+    window.claude.downloads.save({ filename: filename, data: blob })
+      .then(function(){ toast("Downloaded " + filename); })
+      .catch(function(err){
+        if (err && err.code === "declined") return;
+        if (err && err.code === "extension_not_enabled") { browserDownload(filename, blob); return; }
+        toast("Export failed: " + (err && err.message || "unknown"));
+      });
+  }
+  function buildDashboardXlsxSheets(){
+    var projRows = [["Key","Name","Category","Division","Status","Priority","Description","Focus","Jira URL"]];
+    allTrackedProjects().forEach(function(p){
+      projRows.push([p.id, p.name, p.category||"", p.division||"", PSTATUS[p.status]?PSTATUS[p.status].label:p.status, p.priority||"", p.description||"", p.focus||"", p.url||""]);
+    });
+    var taskRows = [["Date","Person","Role","Project","Project Name","Issue Key","Task","Status","Note","Blocked By","Source"]];
+    state.entries.slice().sort(function(a,b){ return a.date < b.date ? 1 : -1; }).forEach(function(e){
+      var p = personOf(e.person), proj = projectOf(e.project);
+      taskRows.push([e.date, p?p.name:e.person, p?p.role:"", e.project, proj?proj.name:"", e.issueKey||"", e.module, STATUS[e.status]?STATUS[e.status].label:e.status, e.note||"", e.blockedBy||"", e.source||"manual"]);
+    });
+    var mpRows = [["Name","Role","Title","Done","In Progress","To Do","Carry Over","Hold","Total"]];
+    TEAM.forEach(function(t){
+      var es = state.entries.filter(function(e){ return e.person === t.id; });
+      var c = countByStatus(es);
+      mpRows.push([t.name, t.role, t.title, c.done, c.inprogress, c.todo, c.carryover, c.hold, es.length]);
+    });
+    return [
+      { name:"Projects", rows: projRows },
+      { name:"Tasks", rows: taskRows },
+      { name:"Man-Power", rows: mpRows }
+    ];
+  }
+
   /* ---------- slide-content builders (reuse the same grouping as the print builders) ---------- */
   function statBullets(stat){
     return STATUS_ORDER.map(function(k){ return { text: STATUS[k].label+": "+stat[k], bold:true, color: STATUS_HEX[k] }; });
@@ -1636,9 +1734,11 @@
       '<button class="btn ghost small" id="btnSyncNow">🔄 Sync now</button>' +
       '<button class="btn ghost" id="btnImport">Import backup</button>' +
       '<button class="btn" id="btnExportJson">Export backup</button>' +
+      '<button class="btn" id="btnExportXlsx">📗 Export Excel</button>' +
       '<button class="btn primary" id="btnNewTicket">+ Create Jira Ticket</button>';
     document.getElementById("btnImport").addEventListener("click", function(){ document.getElementById("fileImport").click(); });
     document.getElementById("btnExportJson").addEventListener("click", function(){ downloadFile("pmo-console-backup-" + TODAY + ".json", JSON.stringify(state, null, 2)); });
+    document.getElementById("btnExportXlsx").addEventListener("click", function(){ exportXlsx("delivery-console-" + TODAY + ".xlsx", "Delivery Console", buildDashboardXlsxSheets()); });
     document.getElementById("btnNewTicket").addEventListener("click", function(){ openJiraModal(); });
     document.getElementById("btnSyncNow").addEventListener("click", manualSync);
     renderSyncIndicator();
