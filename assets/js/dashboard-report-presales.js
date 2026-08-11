@@ -435,8 +435,23 @@
     });
     return lines.join("\n");
   }
+  // Plain-browser fallback (Vercel, or any host outside the Claude viewer) — a real <a download>,
+  // no window.claude needed. Used whenever the Claude downloads bridge isn't present.
+  function browserDownload(filename, data){
+    var mime = /\.json$/.test(filename) ? "application/json"
+      : /\.md$/.test(filename) ? "text/markdown"
+      : /\.pptx$/.test(filename) ? "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+      : "application/octet-stream";
+    var blob = (data instanceof Blob) ? data : new Blob([data], { type: mime });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+    toast("Downloaded " + filename);
+  }
   function downloadFile(filename, data){
-    if (!window.claude || !window.claude.downloads){ toast("Downloads aren't available in this viewer"); return; }
+    if (!window.claude || !window.claude.downloads){ browserDownload(filename, data); return; }
     window.claude.downloads.save({ filename: filename, data: data })
       .then(function(){ toast("Downloaded"); })
       .catch(function(err){ if (err && err.code === "declined") return; toast("Download failed: " + (err && err.message || "unknown")); });
@@ -704,14 +719,14 @@
     return buildZip(files);
   }
   function exportPptx(filename, title, slides){
-    if (!window.claude || !window.claude.downloads){ toast("Downloads aren't available in this viewer"); return; }
     var bytes = buildPptxBytes(title, slides);
     var blob = new Blob([bytes], { type:"application/vnd.openxmlformats-officedocument.presentationml.presentation" });
+    if (!window.claude || !window.claude.downloads){ browserDownload(filename, blob); return; }
     window.claude.downloads.save({ filename: filename, data: blob })
       .then(function(){ toast("Downloaded " + filename); })
       .catch(function(err){
         if (err && err.code === "declined") return;
-        if (err && err.code === "extension_not_enabled") { toast("PowerPoint export isn't enabled in this viewer — try Export .md instead."); return; }
+        if (err && err.code === "extension_not_enabled") { browserDownload(filename, blob); return; }
         toast("Export failed: " + (err && err.message || "unknown"));
       });
   }
@@ -786,6 +801,9 @@
 
   var JIRA_SERVER_HINT = "atlassian";
   var jiraServerName = null;
+  // Two channels reach Jira: window.claude.mcp (inside the Claude Artifact viewer)
+  // or this site's own /api/jira-* serverless functions (Vercel, plain browser).
+  // mcpAvailable() decides which one every call below goes through.
   function mcpAvailable(){ return !!(window.claude && window.claude.mcp); }
   function resolveJiraServer(){
     if (jiraServerName) return Promise.resolve(jiraServerName);
@@ -801,7 +819,7 @@
   function jiraErrorMessage(err){
     switch (err && err.code) {
       case "needs_reauth": return "Your Atlassian connection expired — reconnect via claude.ai Settings → Connectors.";
-      case "server_not_connected": return "Atlassian isn't connected — add it via claude.ai Settings → Connectors.";
+      case "server_not_connected": return "Jira isn't reachable here — in the Claude viewer, add Atlassian via claude.ai Settings → Connectors; on Vercel, check the /api routes are deployed with JIRA_* env vars set.";
       case "selection_required": return "Multiple Atlassian accounts are connected — choose one in the viewer prompt, then try again.";
       case "blocked_by_policy": return "Blocked by an organization policy.";
       case "approval_required": return "This action needs organization approval first.";
@@ -811,6 +829,76 @@
       case "not_granted": case "capability_disabled": case "capability_removed": return "Jira integration isn't active in this viewer.";
       default: return "Failed: " + (err && err.message ? err.message : "unknown error");
     }
+  }
+
+  // ---- backend (Vercel /api) channel: only used when window.claude.mcp is absent ----
+  function jiraFetch(path, body){
+    return fetch(path, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body || {}) })
+      .then(function(r){
+        return r.json().catch(function(){ return {}; }).then(function(data){
+          if (!r.ok) {
+            var msg = data.error || (data.errorMessages && data.errorMessages.join(", ")) || ("HTTP " + r.status);
+            var err = new Error(msg); err.code = "tool_error"; throw err;
+          }
+          return data;
+        });
+      })
+      .catch(function(e){
+        if (e && e.code) throw e;
+        var err = new Error("Can't reach " + path + " — is this hosted on Vercel with the API routes deployed?");
+        err.code = "server_not_connected";
+        throw err;
+      });
+  }
+
+  // ---- unified Jira operations: routes through mcp or the backend automatically ----
+  function jiraSearchIssues(jql, maxResults, fields){
+    if (mcpAvailable()) {
+      return resolveJiraServer().then(function(server){
+        return window.claude.mcp.callTool(server, "searchJiraIssuesUsingJql", { cloudId: JIRA_CLOUD, jql: jql, maxResults: maxResults, fields: fields });
+      }).then(function(r){
+        var nodes = (r.payload && r.payload.issues && r.payload.issues.nodes) || [];
+        return nodes.map(function(n){ return { key: n.key, fields: n.fields }; });
+      });
+    }
+    return jiraFetch("/api/jira-search", { jql: jql, maxResults: maxResults, fields: fields }).then(function(data){
+      return (data.issues || []).map(function(n){ return { key: n.key, fields: n.fields }; });
+    });
+  }
+  function jiraCreateIssue(opts){
+    // opts: {projectKey, issueTypeName, summary, description, assigneeAccountId, parentKey, dueDate, startDate}
+    if (mcpAvailable()) {
+      return resolveJiraServer().then(function(server){
+        function payloadFor(includeStart){
+          var payload = { cloudId: JIRA_CLOUD, projectKey: opts.projectKey, issueTypeName: opts.issueTypeName, summary: opts.summary };
+          if (opts.description) payload.description = opts.description;
+          if (opts.assigneeAccountId) payload.assignee_account_id = opts.assigneeAccountId;
+          if (opts.parentKey) payload.parent = opts.parentKey;
+          var additional = {};
+          if (opts.dueDate) additional.duedate = opts.dueDate;
+          if (includeStart && opts.startDate) additional.customfield_10015 = opts.startDate;
+          if (Object.keys(additional).length) payload.additional_fields = additional;
+          return payload;
+        }
+        return window.claude.mcp.callTool(server, "createJiraIssue", payloadFor(true)).catch(function(err){
+          if (err && err.code === "tool_error" && opts.startDate) return window.claude.mcp.callTool(server, "createJiraIssue", payloadFor(false));
+          throw err;
+        });
+      }).then(function(r){
+        var issue = null;
+        try { issue = r.payload && r.payload.issues && r.payload.issues.nodes && r.payload.issues.nodes[0]; } catch(e){}
+        return { key: issue && issue.key };
+      });
+    }
+    return jiraFetch("/api/jira-create", opts).then(function(data){ return { key: data.key }; });
+  }
+  function jiraAddComment(issueKey, commentBody){
+    if (mcpAvailable()) {
+      return resolveJiraServer().then(function(server){
+        return window.claude.mcp.callTool(server, "addCommentToJiraIssue", { cloudId: JIRA_CLOUD, issueIdOrKey: issueKey, commentBody: commentBody });
+      });
+    }
+    return jiraFetch("/api/jira-comment", { issueKey: issueKey, commentBody: commentBody });
   }
 
   /* =====================================================================
@@ -852,10 +940,9 @@
     var t = TEAM.find(function(x){ return x.accountId === assignee.accountId; });
     return t ? t.id : (assignee.displayName || "Unassigned");
   }
-  function mergeSyncedIssues(payload){
-    var nodes = (payload && payload.issues && payload.issues.nodes) || [];
+  function mergeSyncedIssues(nodes){
     var touched = 0;
-    nodes.forEach(function(issue){
+    (nodes || []).forEach(function(issue){
       var key = issue.key;
       var f = issue.fields || {};
       var projectId = mapJiraProjectToOurs(f.project && f.project.key, f.parent && f.parent.key);
@@ -897,6 +984,14 @@
     var hrs = Math.round(mins/60);
     return hrs + "h ago";
   }
+  function applySyncResult(nodes){
+    var touched = mergeSyncedIssues(nodes);
+    state.lastSyncedAt = Date.now();
+    syncStatus = { state:"ok" };
+    saveState();
+    renderSyncIndicator();
+    if (touched) toast("Synced " + touched + " tickets from Jira");
+  }
   function handleSyncEvent(ev){
     if (ev.type === "error") {
       syncStatus = { state:"error", message: jiraErrorMessage(ev.error) };
@@ -904,32 +999,42 @@
       return;
     }
     try {
-      var touched = mergeSyncedIssues(ev.result.payload);
-      state.lastSyncedAt = Date.now();
-      syncStatus = { state:"ok" };
-      saveState();
-      renderSyncIndicator();
-      if (touched) toast("Synced " + touched + " tickets from Jira");
+      var nodes = (ev.result.payload && ev.result.payload.issues && ev.result.payload.issues.nodes) || [];
+      applySyncResult(nodes.map(function(n){ return { key:n.key, fields:n.fields }; }));
     } catch (e) {
       syncStatus = { state:"error", message:"Couldn't read the Jira response" };
       renderSyncIndicator();
     }
   }
-  function startJiraSync(){
-    if (!mcpAvailable()) return;
+  // The backend (Vercel /api) path has no push-based watch primitive — plain interval polling.
+  function runSyncViaBackend(){
     syncStatus = { state:"syncing" };
     renderSyncIndicator();
-    resolveJiraServer().then(function(server){
-      syncUnsubscribe = window.claude.mcp.watchTool(server, "searchJiraIssuesUsingJql", buildSyncInput(), handleSyncEvent, { refetchInterval: SYNC_INTERVAL_MS });
-    }).catch(function(err){
-      syncStatus = { state:"error", message: jiraErrorMessage(err) };
+    var input = buildSyncInput();
+    jiraSearchIssues(input.jql, input.maxResults, input.fields)
+      .then(applySyncResult)
+      .catch(function(err){ syncStatus = { state:"error", message: jiraErrorMessage(err) }; renderSyncIndicator(); });
+  }
+  function startJiraSync(){
+    if (mcpAvailable()) {
+      syncStatus = { state:"syncing" };
       renderSyncIndicator();
-    });
+      resolveJiraServer().then(function(server){
+        syncUnsubscribe = window.claude.mcp.watchTool(server, "searchJiraIssuesUsingJql", buildSyncInput(), handleSyncEvent, { refetchInterval: SYNC_INTERVAL_MS });
+      }).catch(function(err){
+        syncStatus = { state:"error", message: jiraErrorMessage(err) };
+        renderSyncIndicator();
+      });
+      return;
+    }
+    // plain browser (Vercel) — poll the backend directly, no window.claude involved
+    runSyncViaBackend();
+    setInterval(runSyncViaBackend, SYNC_INTERVAL_MS);
   }
   function manualSync(){
-    if (!mcpAvailable()){ toast("Jira sync isn't available in this viewer"); return; }
     syncStatus = { state:"syncing" };
     renderSyncIndicator();
+    if (!mcpAvailable()) { runSyncViaBackend(); return; }
     if (!syncUnsubscribe) { startJiraSync(); return; }
     resolveJiraServer().then(function(server){
       return window.claude.mcp.invalidate(server, "searchJiraIssuesUsingJql", buildSyncInput());
@@ -940,15 +1045,12 @@
   }
 
   function postDeliverableComment(entry, deliv){
-    if (!mcpAvailable()) return;
     var p = personOf(entry.person);
     var line = deliv.type === "file"
       ? "📎 " + deliv.label + " — file *" + deliv.fileName + "* attached in Delivery Console (not uploaded to Jira automatically)."
       : "🔗 [" + deliv.label + "](" + deliv.url + ")";
     var body = "**Deliverable added:** " + line + "\n\nLogged by " + (p?p.name:entry.person) + " via Delivery Console.";
-    resolveJiraServer().then(function(server){
-      return window.claude.mcp.callTool(server, "addCommentToJiraIssue", { cloudId: JIRA_CLOUD, issueIdOrKey: entry.issueKey, commentBody: body });
-    }).then(function(){
+    jiraAddComment(entry.issueKey, body).then(function(){
       toast("Also posted to " + entry.issueKey + " on Jira");
     }).catch(function(err){
       toast("Deliverable saved, but Jira comment failed: " + jiraErrorMessage(err || {}));
@@ -967,7 +1069,6 @@
     return opts;
   }
   function openJiraModal(defaultProjectId){
-    if (!mcpAvailable()){ toast("Jira connection (MCP) isn't available in this viewer"); return; }
     var opts = jiraSpaceOptionsHtml();
     var sel = document.getElementById("jiraProject");
     sel.innerHTML = opts.map(function(o){ return '<option value="'+esc(o.value)+'" data-jirakey="'+esc(o.jiraKey)+'" data-parent="'+esc(o.parent)+'"'+(o.value===defaultProjectId?' selected':'')+'>'+esc(o.label)+'</option>'; }).join("");
@@ -1004,32 +1105,12 @@
     var btn = document.getElementById("jiraSubmit");
     btn.disabled = true; setModalStatus("info", "Creating ticket…");
 
-    function buildPayload(includeStart){
-      var payload = { cloudId: JIRA_CLOUD, projectKey: projectKey, issueTypeName: issueTypeName, summary: summary };
-      if (description) payload.description = description;
-      if (assignee) payload.assignee_account_id = assignee;
-      if (parentKey) payload.parent = parentKey;
-      var additional = {};
-      if (dueDate) additional.duedate = dueDate;
-      if (includeStart && startDate) additional.customfield_10015 = startDate;
-      if (Object.keys(additional).length) payload.additional_fields = additional;
-      return payload;
-    }
-
-    resolveJiraServer().then(function(server){
-      return window.claude.mcp.callTool(server, "createJiraIssue", buildPayload(true)).catch(function(err){
-        if (err && err.code === "tool_error" && startDate) {
-          return window.claude.mcp.callTool(server, "createJiraIssue", buildPayload(false)).then(function(res){
-            setModalStatus("info", "Created without the start date field (not available on this project).");
-            return res;
-          });
-        }
-        throw err;
-      });
+    jiraCreateIssue({
+      projectKey: projectKey, issueTypeName: issueTypeName, summary: summary,
+      description: description, assigneeAccountId: assignee, parentKey: parentKey,
+      dueDate: dueDate, startDate: startDate
     }).then(function(result){
-      var issue = null;
-      try { issue = result.payload && result.payload.issues && result.payload.issues.nodes && result.payload.issues.nodes[0]; } catch(e){}
-      if (issue && issue.key){ setModalStatus("ok", "Ticket " + issue.key + " created."); toast("Ticket " + issue.key + " created in Jira"); }
+      if (result.key){ setModalStatus("ok", "Ticket " + result.key + " created."); toast("Ticket " + result.key + " created in Jira"); }
       else { setModalStatus("ok", "Ticket created."); toast("Ticket created in Jira"); }
       btn.disabled = false;
       setTimeout(closeJiraModal, 1400);
